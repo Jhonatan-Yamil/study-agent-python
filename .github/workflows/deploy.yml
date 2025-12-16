@@ -66,17 +66,27 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ github.event.inputs.gemini_api_key }}
         run: |
-          ssh -i key.pem "ubuntu@$PUBLIC_IP" <<'EOF'
-sudo apt-get update -y
-sudo apt-get install -y docker.io docker-compose-plugin
-sudo systemctl enable --now docker
-mkdir -p ~/app && cd ~/app
-tar xzf ~/backend.tgz
-cd backend
-sudo docker build -t study-agent .
-sudo docker rm -f study-agent || true
-sudo docker run -d --name study-agent -p 80:5000 -e GEMINI_API_KEY="$GEMINI_API_KEY" study-agent
-EOF
+          ssh -i key.pem ubuntu@$PUBLIC_IP <<EOF
+            set -e
+
+            sudo apt-get update -y
+            sudo apt-get install -y docker.io docker-compose-plugin
+            sudo systemctl enable --now docker
+
+            mkdir -p ~/app
+            cd ~/app
+            tar xzf ~/backend.tgz
+
+            cd backend
+            sudo docker build -t study-agent .
+
+            sudo docker rm -f study-agent || true
+            sudo docker run -d \
+              --name study-agent \
+              -p 80:5000 \
+              -e GEMINI_API_KEY="$GEMINI_API_KEY" \
+              study-agent
+          EOF
 
       - name: Output app URL
         run: echo "App URL: http://$PUBLIC_IP/"

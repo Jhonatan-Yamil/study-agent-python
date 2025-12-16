@@ -1,0 +1,83 @@
+name: Simple Deploy to EC2
+on:
+  workflow_dispatch:
+    inputs:
+      gemini_api_key:
+        description: "GEMINI_API_KEY for the container"
+        required: true
+        default: ""
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      SG_NAME: study-agent-sg
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Prepare key pair
+        run: |
+          KEY_NAME="study-agent-key-${GITHUB_RUN_ID}"
+          aws ec2 create-key-pair --key-name "$KEY_NAME" --query 'KeyMaterial' --output text > key.pem
+          chmod 600 key.pem
+          echo "KEY_NAME=$KEY_NAME" >> $GITHUB_ENV
+
+      - name: Ensure security group
+        run: |
+          SG_ID=$(aws ec2 describe-security-groups --group-names "$SG_NAME" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || true)
+          if [ "$SG_ID" = "None" ] || [ -z "$SG_ID" ]; then
+            SG_ID=$(aws ec2 create-security-group --group-name "$SG_NAME" --description "study-agent sg" --output text)
+            aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 22 --cidr 0.0.0.0/0
+            aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 80 --cidr 0.0.0.0/0
+          fi
+          echo "SG_ID=$SG_ID" >> $GITHUB_ENV
+
+      - name: Launch EC2
+        run: |
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id ami-0f5fcdfbd140e4ab7 \
+            --instance-type t3.micro \
+            --key-name "$KEY_NAME" \
+            --security-group-ids "$SG_ID" \
+            --query 'Instances[0].InstanceId' --output text)
+          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+          aws ec2 wait instance-status-ok --instance-ids "$INSTANCE_ID"
+          PUBLIC_IP=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+          echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+
+      - name: Add host to known_hosts
+        run: ssh-keyscan -H "$PUBLIC_IP" >> ~/.ssh/known_hosts
+
+      - name: Copy backend to EC2
+        run: |
+          tar czf backend.tgz backend
+          scp -i key.pem backend.tgz "ubuntu@$PUBLIC_IP:/home/ubuntu/"
+
+      - name: Remote deploy
+        env:
+          GEMINI_API_KEY: ${{ github.event.inputs.gemini_api_key }}
+        run: |
+          ssh -i key.pem "ubuntu@$PUBLIC_IP" <<'EOF'
+          set -e
+          sudo apt-get update -y
+          sudo apt-get install -y docker.io docker-compose-plugin
+          sudo systemctl enable --now docker
+          mkdir -p ~/app && cd ~/app
+          tar xzf ~/backend.tgz
+          cd backend
+          sudo docker build -t study-agent .
+          sudo docker rm -f study-agent || true
+          sudo docker run -d --name study-agent -p 80:5000 -e GEMINI_API_KEY="$GEMINI_API_KEY" study-agent
+          EOF
+
+      - name: Output app URL
+        run: echo "App URL: http://$PUBLIC_IP/"

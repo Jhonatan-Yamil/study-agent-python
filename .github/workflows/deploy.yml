@@ -87,6 +87,3 @@ jobs:
               -e GEMINI_API_KEY="$GEMINI_API_KEY" \
               study-agent
           EOF
-
-      - name: Output app URL
-        run: echo "App URL: http://$PUBLIC_IP/"
